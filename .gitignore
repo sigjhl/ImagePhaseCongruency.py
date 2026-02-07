@@ -7,3 +7,15 @@
 docs/build/
 docs/site/
 Manifest.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+.pytest_cache/
