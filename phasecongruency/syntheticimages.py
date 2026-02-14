@@ -145,8 +145,10 @@ def starsine(sze=512, ncycles=10, nscales=50, ampexponent=-1, offset=0):
         u = (sze - 1) / 2
 
     coords = np.arange(l, u + 1)
+    # Julia: [atan(y,x) for x = l:u, y = l:u] puts x in rows, y in columns.
+    # To match: row index = x, col index = y, so theta[i,j] = atan2(coords[j], coords[i])
     x, y = np.meshgrid(coords, coords)
-    theta = np.arctan2(y, x)
+    theta = np.arctan2(x, y)
 
     img = np.zeros(theta.shape)
     for scale in range(1, nscales * 2, 2):

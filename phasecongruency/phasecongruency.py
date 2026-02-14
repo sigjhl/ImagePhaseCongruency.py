@@ -363,7 +363,8 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
         T = EstNoiseEnergyMean + k * EstNoiseEnergySigma
 
     # Final computation
-    or_ = np.arctan2(-sumh2, sumh1)
+    # Julia uses single-arg atan(ratio) giving range (-pi/2, pi/2)
+    or_ = np.arctan(-sumh2 / sumh1)
     ft = np.arctan2(sumf, np.sqrt(sumh1**2 + sumh2**2))
     energy = np.sqrt(sumf**2 + sumh1**2 + sumh2**2)
 
@@ -806,7 +807,8 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
     M = (covy2 + covx2 + denom) / 2
     m = (covy2 + covx2 - denom) / 2
 
-    or_ = np.arctan2(-EnergyV[:, :, 2], EnergyV[:, :, 1])
+    # Julia uses single-arg atan(ratio) giving range (-pi/2, pi/2)
+    or_ = np.arctan(-EnergyV[:, :, 2] / EnergyV[:, :, 1])
     OddV = np.sqrt(EnergyV[:, :, 1]**2 + EnergyV[:, :, 2]**2)
     featType = np.arctan2(EnergyV[:, :, 0], OddV)
 

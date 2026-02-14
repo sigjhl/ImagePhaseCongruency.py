@@ -106,7 +106,10 @@ def hysthresh(img, T1, T2):
     bw = np.zeros(img.shape, dtype=bool)
 
     # Form 8-connected components of pixels with value >= lower threshold
-    labeled, num_features = label(img >= T2)
+    # Julia uses strel_box((3,3)) which is 8-connectivity; scipy.ndimage.label
+    # defaults to 4-connectivity (cross), so we must pass a 3x3 ones structure.
+    structure = np.ones((3, 3), dtype=int)
+    labeled, num_features = label(img >= T2, structure=structure)
 
     # For each component, check if any pixel exceeds T1
     for n in range(1, num_features + 1):

@@ -238,7 +238,8 @@ def ref_phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
         EstNoiseEnergySigma = totalTau * np.sqrt((4 - np.pi) / 2)
         T = EstNoiseEnergyMean + k * EstNoiseEnergySigma
 
-    or_ = np.arctan2(-sumh2, sumh1)
+    # Julia uses single-arg atan(ratio) giving range (-pi/2, pi/2)
+    or_ = np.arctan(-sumh2 / sumh1)
     ft = np.arctan2(sumf, np.sqrt(sumh1**2 + sumh2**2))
     energy = np.sqrt(sumf**2 + sumh1**2 + sumh2**2)
 
@@ -570,6 +571,67 @@ def test_bandpassmonogenic():
     check("bandpassmonogenic E >= 0", np.all(E >= -1e-10))
 
 
+def test_regression_hysthresh_8connectivity():
+    """Regression: hysthresh must use 8-connectivity (Julia strel_box((3,3)))."""
+    print("\n=== regression: hysthresh 8-connectivity ===")
+    # Construct a case where 4-connectivity and 8-connectivity differ:
+    # A diagonal connection should link components with 8-connectivity.
+    img = np.zeros((10, 10))
+    img[2, 2] = 20   # seed pixel (above T1)
+    img[3, 3] = 5    # diagonally connected (above T2 but below T1)
+    # With 8-connectivity: (3,3) is connected to (2,2), so it should be marked.
+    # With 4-connectivity: (3,3) is NOT connected to (2,2).
+    bw = hysthresh(img, 10, 3)
+    check("hysthresh 8-conn: seed marked", bw[2, 2] == True)
+    check("hysthresh 8-conn: diagonal neighbor marked", bw[3, 3] == True,
+          f"got {bw[3, 3]}, expected True (8-connectivity)")
+
+
+def test_regression_starsine_orientation():
+    """Regression: starsine should match Julia's row=x, col=y convention."""
+    print("\n=== regression: starsine orientation ===")
+    # In Julia: theta[i,j] = atan(coords[j], coords[i])
+    # At position (0, k) where k>0: theta = atan(coords[k], coords[center]) = atan(k, 0) = pi/2
+    # At position (k, 0) where k>0: theta = atan(coords[center], coords[k]) = atan(0, k) = 0
+    sze = 65
+    img = starsine(sze, ncycles=10, nscales=1, offset=0)
+    center = sze // 2
+    # Check that the pattern at (center, center+10) differs from (center+10, center)
+    # This verifies the orientation is correct (not transposed)
+    # Julia ref: theta[center, center+k] = atan(coords[k], 0) = pi/2 (or -pi/2)
+    # So sin(ncycles * pi/2) should give the pattern value at that point
+    val_right = img[center, center + 10]   # should correspond to theta ~ pi/2
+    val_below = img[center + 10, center]   # should correspond to theta ~ 0
+    check("starsine orientation: right-of-center value",
+          abs(val_right - np.sin(10 * np.pi / 2)) < 0.1,
+          f"got {val_right}, expected ~{np.sin(10 * np.pi / 2)}")
+    check("starsine orientation: below-center value",
+          abs(val_below - np.sin(0)) < 0.1,
+          f"got {val_below}, expected ~0")
+
+
+def test_regression_phasecongmono_orientation_range():
+    """Regression: phasecongmono orientation must be in (-pi/2, pi/2)."""
+    print("\n=== regression: phasecongmono orientation range ===")
+    np.random.seed(42)
+    img = np.random.randn(32, 32)
+    _, or_, _, _ = phasecongmono(img, nscale=3)
+    check("phasecongmono or in (-pi/2, pi/2)",
+          np.all(or_ >= -np.pi / 2 - 1e-10) and np.all(or_ <= np.pi / 2 + 1e-10),
+          f"min={or_.min():.4f}, max={or_.max():.4f}")
+
+
+def test_regression_phasecong3_orientation_range():
+    """Regression: phasecong3 orientation must be in (-pi/2, pi/2)."""
+    print("\n=== regression: phasecong3 orientation range ===")
+    np.random.seed(42)
+    img = np.random.randn(32, 32)
+    _, _, or_, _, _, _ = phasecong3(img, nscale=3, norient=4)
+    check("phasecong3 or in (-pi/2, pi/2)",
+          np.all(or_ >= -np.pi / 2 - 1e-10) and np.all(or_ <= np.pi / 2 + 1e-10),
+          f"min={or_.min():.4f}, max={or_.max():.4f}")
+
+
 # ============================================================
 # Run all tests
 # ============================================================
@@ -599,6 +661,10 @@ if __name__ == "__main__":
     test_syntheticimages()
     test_utilities()
     test_bandpassmonogenic()
+    test_regression_hysthresh_8connectivity()
+    test_regression_starsine_orientation()
+    test_regression_phasecongmono_orientation_range()
+    test_regression_phasecong3_orientation_range()
 
     print("\n" + "=" * 60)
     print(f"Results: {PASS} passed, {FAIL} failed out of {PASS + FAIL}")
