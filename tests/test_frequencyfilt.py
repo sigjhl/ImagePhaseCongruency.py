@@ -186,3 +186,7 @@ class TestGeoseries:
         s1 = geoseries(0.5, 2, 4)
         s2 = geoseries((0.5, 4), 4)
         np.testing.assert_allclose(s1, s2, atol=np.finfo(float).eps)
+
+    def test_tuple_single_element(self):
+        s = geoseries((0.5, 4), 1)
+        np.testing.assert_allclose(s, np.array([0.5]), atol=np.finfo(float).eps)

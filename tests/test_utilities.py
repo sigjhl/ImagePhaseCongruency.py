@@ -64,6 +64,19 @@ class TestImgnormalize:
         assert np.isclose(np.mean(result), reqmean, atol=0.01)
         assert np.isclose(np.var(result), reqvar, atol=0.1)
 
+    def test_normalize_mean_var_uses_sample_std(self):
+        img = np.array([[0.0, 1.0]])
+        result = imgnormalise(img, 0.0, 1.0)
+        assert np.isclose(np.var(result, ddof=1), 1.0)
+
+    def test_normalize_mean_var_constant_input(self):
+        img = np.ones((8, 8))
+        reqmean = 3.5
+        reqvar = 2.0
+        result = imgnormalise(img, reqmean, reqvar)
+        assert not np.isnan(result).any()
+        assert np.allclose(result, reqmean)
+
 
 class TestHisttruncate:
     def test_basic(self):

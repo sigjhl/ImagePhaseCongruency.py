@@ -39,6 +39,13 @@ class TestPpdrc:
         assert isinstance(dimg, list)
         assert len(dimg) == 3
 
+    def test_multiple_wavelengths_sets_fortran_linear_anchor_pixels(self, test_image):
+        dimg = ppdrc(test_image, geoseries((20, 60), 3))
+        maxrange = max(np.max(np.abs(d)) for d in dimg)
+        for d in dimg:
+            assert np.isclose(d[0, 0], maxrange)
+            assert np.isclose(d[1, 0], -maxrange)
+
 
 class TestPhasecongmono:
     def test_default(self, test_image):
@@ -54,6 +61,10 @@ class TestPhasecongmono:
             deviationgain=1.5, noisemethod=-1
         )
         assert PC.shape == test_image.shape
+
+    def test_nscale_too_small_raises(self, test_image):
+        with pytest.raises(ValueError):
+            phasecongmono(test_image, nscale=1)
 
 
 class TestPhasesymmono:
@@ -85,6 +96,10 @@ class TestPhasecong3:
             g=10, noisemethod=-1
         )
         assert M.shape == test_image.shape
+
+    def test_nscale_too_small_raises(self, test_image):
+        with pytest.raises(ValueError):
+            phasecong3(test_image, nscale=1)
 
 
 class TestPhasesym:

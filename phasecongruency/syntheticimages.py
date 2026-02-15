@@ -109,7 +109,7 @@ def circsine(sze=512, wavelength=40, nscales=50, ampexponent=-1, offset=0,
     if trim:
         cycles = np.floor(sze / 2 / wavelength)
         mask = (r < cycles * wavelength).astype(float)
-        img *= mask + (1 - mask)
+        img *= mask
 
     return img
 

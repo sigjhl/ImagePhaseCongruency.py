@@ -116,8 +116,10 @@ def ppdrc(img, wavelength, clip=0.01, n=2):
 
         maxrange = np.max(ranges)
         for k in range(nscale):
-            dimg[k].ravel()[0] = maxrange
-            dimg[k].ravel()[1] = -maxrange
+            if dimg[k].size >= 1:
+                dimg[k][np.unravel_index(0, dimg[k].shape, order="F")] = maxrange
+            if dimg[k].size >= 2:
+                dimg[k][np.unravel_index(1, dimg[k].shape, order="F")] = -maxrange
 
     if nscale == 1:
         return dimg[0]
@@ -300,6 +302,8 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
         Calculated noise threshold.
     """
     img = np.asarray(img, dtype=np.float64)
+    if nscale < 2:
+        raise ValueError("nscale must be at least 2")
     epsilon = 0.0001
 
     rows, cols = img.shape
@@ -685,6 +689,8 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
         Calculated noise threshold.
     """
     img = np.asarray(img, dtype=np.float64)
+    if nscale < 2:
+        raise ValueError("nscale must be at least 2")
     epsilon = 1e-5
     rows, cols = img.shape
     IMG = fft2(img)

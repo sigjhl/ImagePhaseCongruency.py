@@ -364,8 +364,14 @@ def compare_phasecongruency_funcs(d, randimg32):
                                                       minwavelength=3, mult=2.0,
                                                       sigmaonf=0.55, k=2.0,
                                                       cutoff=0.5, g=10.0, noisemethod=-1.0)
-    results.append(compare("phasecong3_M", load(d, "phasecong3_M"), M, atol=1e-8, rtol=1e-8))
-    results.append(compare("phasecong3_m", load(d, "phasecong3_m"), m, atol=1e-8, rtol=1e-8))
+    jl_M = load(d, "phasecong3_Mmax")
+    if jl_M is None:
+        jl_M = load(d, "phasecong3_M")
+    jl_m = load(d, "phasecong3_mmin")
+    if jl_m is None:
+        jl_m = load(d, "phasecong3_m")
+    results.append(compare("phasecong3_M", jl_M, M, atol=1e-8, rtol=1e-8))
+    results.append(compare("phasecong3_m", jl_m, m, atol=1e-8, rtol=1e-8))
     results.append(compare("phasecong3_or", load(d, "phasecong3_or"), or_pc3, atol=1e-8, rtol=1e-8))
     results.append(compare("phasecong3_ft", load(d, "phasecong3_ft"), featType, atol=1e-8, rtol=1e-8))
     results.append(compare("phasecong3_T", load(d, "phasecong3_T"), np.atleast_1d(T_pc3), atol=1e-8, rtol=1e-8))

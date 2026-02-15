@@ -228,10 +228,14 @@ println("  hysthresh")
 # fillnan
 nanimg2 = copy(Float64.(randimg[1:20, 1:20]))
 nanimg2[5:10, 5:10] .= NaN
-newimg2, mask2 = fillnan(nanimg2)
-save("fillnan_img", newimg2)
-save("fillnan_mask", Float64.(mask2))
-println("  fillnan")
+try
+    newimg2, mask2 = fillnan(nanimg2)
+    save("fillnan_img", newimg2)
+    save("fillnan_mask", Float64.(mask2))
+    println("  fillnan")
+catch err
+    println("  fillnan (skipped due to Julia runtime error: ", err, ")")
+end
 
 # ====================================================================
 # 4. PHASE CONGRUENCY FUNCTIONS
@@ -288,8 +292,10 @@ M, m, or_pc3, featType, EO, T_pc3 = phasecong3(randimg32, nscale=3, norient=4,
                                                    minwavelength=3, mult=2.0,
                                                    sigmaonf=0.55, k=2.0,
                                                    cutoff=0.5, g=10.0, noisemethod=-1.0)
-save("phasecong3_M", M)
-save("phasecong3_m", m)
+# Use distinct names that do not differ only by case to avoid collisions on
+# case-insensitive filesystems.
+save("phasecong3_Mmax", M)
+save("phasecong3_mmin", m)
 save("phasecong3_or", or_pc3)
 save("phasecong3_ft", featType)
 save("phasecong3_T", T_pc3)

@@ -145,8 +145,13 @@ def imgnormalise(img, reqmean=None, reqvar=None):
     nimg has mean reqmean and variance reqvar.
     """
     if reqmean is not None and reqvar is not None:
+        if np.size(img) <= 1:
+            return np.full_like(img, float(reqmean), dtype=np.float64)
+        std = np.std(img, ddof=1)
+        if not np.isfinite(std) or std <= np.finfo(float).eps:
+            return np.full_like(img, float(reqmean), dtype=np.float64)
         n = img - np.mean(img)
-        n = n / np.std(img)
+        n = n / std
         return reqmean + n * np.sqrt(reqvar)
     else:
         n = img - np.min(img)

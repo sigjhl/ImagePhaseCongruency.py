@@ -497,6 +497,8 @@ def geoseries(s1, mult_or_n=None, n=None):
         n_val = int(mult_or_n)
         assert s1_val > 0, "Starting value must be > 0"
         assert n_val > 0, "Number of elements must be a +ve integer"
+        if n_val == 1:
+            return np.array([s1_val], dtype=float)
         mult = np.exp(np.log(sn_val / s1_val) / (n_val - 1))
         return s1_val * mult ** np.arange(n_val)
     else:

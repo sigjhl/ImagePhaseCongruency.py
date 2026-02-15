@@ -43,6 +43,12 @@ class TestCircsine:
         with pytest.raises(ValueError):
             circsine(128, p=3)
 
+    def test_trim_masks_corners(self):
+        img_untrim = circsine(64, wavelength=7, nscales=5, trim=False)
+        img_trim = circsine(64, wavelength=7, nscales=5, trim=True)
+        assert not np.allclose(img_untrim, img_trim)
+        assert np.isclose(img_trim[0, 0], 0.0)
+
 
 class TestStarsine:
     def test_default(self):
