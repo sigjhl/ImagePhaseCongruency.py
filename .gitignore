@@ -19,3 +19,7 @@ build/
 .eggs/
 *.so
 .pytest_cache/
+.venv/
+.uv-cache/
+.local/
+tmp_phasesym_compare_*/

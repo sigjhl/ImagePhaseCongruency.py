@@ -4,6 +4,20 @@ Python package for phase-congruency-based feature detection and phase-preserving
 
 ## Installation
 
+From source with pip:
+
+```bash
+pip install .
+```
+
+Editable install for development:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Or with uv:
+
 ```bash
 uv sync --extra dev
 ```
@@ -22,6 +36,8 @@ phSym, orient, totalEnergy, Tps = phasesym(img)
 
 ```bash
 UV_CACHE_DIR=.uv-cache uv run pytest tests -q
+# or
+pytest tests -q
 ```
 
 ## Scope
