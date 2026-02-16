@@ -66,10 +66,10 @@ phSym, orient, totalEnergy, Tps = phasesym(img)
 
 ## Parameter Configurability
 
-Yes. Core algorithm parameters are configurable in Python, matching the Julia package intent.
+Core algorithm parameters are exposed as keyword arguments in Python.
 
 - Use keyword arguments on: `phasecongmono`, `phasecong3`, `phasesymmono`, `phasesym`, `ppdrc`, `ppdenoise`, `monofilt`, `gaborconvolve`, `highpassmonogenic`, and `bandpassmonogenic`.
-- Default values follow the Julia defaults used in the transpilation.
+- Default values are defined in each function signature.
 - Inspect any callable signature directly:
 
 ```python

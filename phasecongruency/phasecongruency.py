@@ -91,8 +91,8 @@ def ppdrc(img, wavelength, clip=0.01, n=2):
 
     Notes
     -----
-    Scaling of the image affects the results. If your image has values of
-    order 1 or less it is useful to scale the image up.
+    Scaling affects the results. Inputs with very small magnitudes may
+    benefit from rescaling before processing.
     """
     img = np.asarray(img, dtype=np.float64)
     wavelength = np.atleast_1d(np.asarray(wavelength, dtype=np.float64))
@@ -254,8 +254,8 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
                   deviationgain=1.5):
     """Phase congruency of an image using monogenic filters.
 
-    This code is considerably faster than phasecong3() but you may prefer
-    the output from phasecong3()'s oriented filters.
+    This variant is typically faster than phasecong3() and returns a reduced
+    output set.
 
     Parameters
     ----------

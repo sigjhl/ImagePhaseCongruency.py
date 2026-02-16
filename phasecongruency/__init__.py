@@ -5,8 +5,6 @@ Phase based feature detection and image enhancement.
 
 Peter Kovesi
 peterkovesi.com
-
-Ported from Julia (ImagePhaseCongruency.jl) to Python.
 """
 
 # Phase congruency and feature detection
