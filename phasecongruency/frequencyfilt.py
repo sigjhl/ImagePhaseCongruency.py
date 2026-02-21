@@ -292,8 +292,8 @@ def loggabor(f, fo, sigmaOnf):
 
     Parameters
     ----------
-    f : float
-        Frequency to evaluate the function at.
+    f : float or ndarray
+        Frequency value(s) to evaluate the function at.
     fo : float
         Centre frequency of filter.
     sigmaOnf : float
@@ -303,18 +303,25 @@ def loggabor(f, fo, sigmaOnf):
 
     Returns
     -------
-    float
-        Log Gabor filter value.
+    float or ndarray
+        Log Gabor filter value(s), matching the shape of ``f``.
 
     Notes
     -----
     sigmaOnf = 0.75 gives a filter bandwidth of about 1 octave.
     sigmaOnf = 0.55 gives a filter bandwidth of about 2 octaves.
     """
-    if f < np.finfo(float).eps:
-        return 0.0
-    else:
-        return np.exp((-(np.log(f / fo)) ** 2) / (2 * np.log(sigmaOnf) ** 2))
+    f_arr = np.asarray(f, dtype=np.float64)
+    out = np.zeros_like(f_arr, dtype=np.float64)
+
+    mask = f_arr >= np.finfo(float).eps
+    if np.any(mask):
+        log_sigma_sq = np.log(sigmaOnf) ** 2
+        out[mask] = np.exp((-(np.log(f_arr[mask] / fo)) ** 2) / (2 * log_sigma_sq))
+
+    if np.isscalar(f):
+        return float(out)
+    return out
 
 
 def gridangles(freq, fx, fy):
@@ -365,16 +372,13 @@ def cosineangularfilter(angl, wavelen, sintheta, costheta):
     """
     sinangl = np.sin(angl)
     cosangl = np.cos(angl)
-    fltr = np.zeros(sintheta.shape)
 
-    for idx in np.ndindex(sintheta.shape):
-        ds = sintheta[idx] * cosangl - costheta[idx] * sinangl
-        dc = costheta[idx] * cosangl + sintheta[idx] * sinangl
-        dtheta = abs(np.arctan2(ds, dc))
-        dtheta = min(dtheta * 2 * np.pi / wavelen, np.pi)
-        fltr[idx] = (np.cos(dtheta) + 1) / 2
+    ds = sintheta * cosangl - costheta * sinangl
+    dc = costheta * cosangl + sintheta * sinangl
+    dtheta = np.abs(np.arctan2(ds, dc))
+    dtheta = np.minimum(dtheta * 2 * np.pi / wavelen, np.pi)
 
-    return fltr
+    return (np.cos(dtheta) + 1) / 2
 
 
 def gaussianangularfilter(angl, thetaSigma, sintheta, costheta):
@@ -398,15 +402,12 @@ def gaussianangularfilter(angl, thetaSigma, sintheta, costheta):
     """
     sinangl = np.sin(angl)
     cosangl = np.cos(angl)
-    fltr = np.zeros(sintheta.shape)
 
-    for idx in np.ndindex(sintheta.shape):
-        ds = sintheta[idx] * cosangl - costheta[idx] * sinangl
-        dc = costheta[idx] * cosangl + sintheta[idx] * sinangl
-        dtheta = np.arctan2(ds, dc)
-        fltr[idx] = np.exp((-dtheta ** 2) / (2 * thetaSigma ** 2))
+    ds = sintheta * cosangl - costheta * sinangl
+    dc = costheta * cosangl + sintheta * sinangl
+    dtheta = np.arctan2(ds, dc)
 
-    return fltr
+    return np.exp((-dtheta ** 2) / (2 * thetaSigma ** 2))
 
 
 def perfft2(img):

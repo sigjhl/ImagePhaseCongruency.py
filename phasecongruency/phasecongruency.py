@@ -319,19 +319,14 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
     T = 0.0
 
     H, freq = packedmonogenicfilters(rows, cols)
+    lowpass_45 = lowpassfilter(freq, 0.45, 15)
 
     for s in range(nscale):
         wavelength = minwavelength * mult**s
         fo = 1.0 / wavelength
 
-        # Construct bandpassed image in frequency domain
-        IMGF = np.zeros((rows, cols), dtype=complex)
-        for idx in np.ndindex(rows, cols):
-            IMGF[idx] = (
-                IMG[idx]
-                * loggabor(freq[idx], fo, sigmaonf)
-                * lowpassfilter(freq[idx], 0.45, 15)
-            )
+        # Construct bandpassed image in frequency domain.
+        IMGF = IMG * loggabor(freq, fo, sigmaonf) * lowpass_45
 
         f = np.real(ifft2(IMGF))
         h = ifft2(IMGF * H)
@@ -432,18 +427,13 @@ def phasesymmono(img, nscale=5, minwavelength=3, mult=2.1, sigmaonf=0.55,
     sumAn = np.zeros((rows, cols))
 
     H, freq = packedmonogenicfilters(rows, cols)
+    lowpass_40 = lowpassfilter(freq, 0.4, 10)
 
     for s in range(nscale):
         wavelength = minwavelength * mult**s
         fo = 1.0 / wavelength
 
-        IMGF = np.zeros((rows, cols), dtype=complex)
-        for idx in np.ndindex(rows, cols):
-            IMGF[idx] = (
-                IMG[idx]
-                * loggabor(freq[idx], fo, sigmaonf)
-                * lowpassfilter(freq[idx], 0.4, 10)
-            )
+        IMGF = IMG * loggabor(freq, fo, sigmaonf) * lowpass_40
 
         f = np.real(ifft2(IMGF))
         h = ifft2(IMGF * H)
@@ -531,10 +521,7 @@ def monofilt(img, nscale, minWaveLength, mult, sigmaOnf, orientWrap=False):
         wavelength = minWaveLength * mult**s
         fo = 1.0 / wavelength
 
-        # Vectorized log Gabor filter
-        logGabor = np.zeros((rows, cols))
-        for idx in np.ndindex(rows, cols):
-            logGabor[idx] = loggabor(freq[idx], fo, sigmaOnf)
+        logGabor = loggabor(freq, fo, sigmaOnf)
 
         H1s = H1 * logGabor
         H2s = H2 * logGabor
@@ -602,16 +589,12 @@ def gaborconvolve(img, nscale, norient, minWaveLength, mult, sigmaOnf,
     thetaSigma = np.pi / norient / dThetaOnSigma
 
     # Construct radial filter components
+    lowpass_45 = lowpassfilter(freq, 0.45, 15)
     for s in range(nscale):
         wavelength = minWaveLength * mult**s
         fo = 1.0 / wavelength
 
-        lg = np.zeros((rows, cols))
-        for idx in np.ndindex(rows, cols):
-            lg[idx] = (
-                loggabor(freq[idx], fo, sigmaOnf)
-                * lowpassfilter(freq[idx], 0.45, 15)
-            )
+        lg = loggabor(freq, fo, sigmaOnf) * lowpass_45
 
         if Lnorm == 2:
             L = np.sqrt(np.sum(lg**2))
@@ -722,16 +705,12 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
     sintheta, costheta = gridangles(freq, fx, fy)
 
     # Construct radial filter components
+    lowpass_45 = lowpassfilter(freq, 0.45, 15)
     for s in range(nscale):
         wavelength = minwavelength * mult**s
         fo = 1.0 / wavelength
 
-        lg = np.zeros((rows, cols))
-        for idx in np.ndindex(rows, cols):
-            lg[idx] = (
-                loggabor(freq[idx], fo, sigmaonf)
-                * lowpassfilter(freq[idx], 0.45, 15)
-            )
+        lg = loggabor(freq, fo, sigmaonf) * lowpass_45
         logGabor_arr[s] = lg
 
     # Main loop
@@ -881,16 +860,12 @@ def phasesym(img, nscale=5, norient=6, minwavelength=3, mult=2.1,
     sintheta, costheta = gridangles(freq, fx, fy)
 
     # Construct radial filter components
+    lowpass_45 = lowpassfilter(freq, 0.45, 15)
     for s in range(nscale):
         wavelength = minwavelength * mult**s
         fo = 1.0 / wavelength
 
-        lg = np.zeros((rows, cols))
-        for idx in np.ndindex(rows, cols):
-            lg[idx] = (
-                loggabor(freq[idx], fo, sigmaonf)
-                * lowpassfilter(freq[idx], 0.45, 15)
-            )
+        lg = loggabor(freq, fo, sigmaonf) * lowpass_45
         logGabor_arr[s] = lg
 
     # Main loop
@@ -1001,9 +976,7 @@ def ppdenoise(img, nscale=5, norient=6, mult=2.5, minwavelength=2,
 
         for s in range(nscale):
             fo = 1.0 / wavelength
-            filt = np.zeros((rows, cols))
-            for idx in np.ndindex(rows, cols):
-                filt[idx] = loggabor(freq[idx], fo, sigmaonf) * angfilter[idx]
+            filt = loggabor(freq, fo, sigmaonf) * angfilter
 
             EO = ifft2(IMG * filt)
             aEO = np.abs(EO)
