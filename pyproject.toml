@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phasecongruency"
-version = "0.2.3"
+version = "1.0.1"
 description = "Phase based feature detection and image enhancement"
 readme = "README.md"
 license = "MIT"
