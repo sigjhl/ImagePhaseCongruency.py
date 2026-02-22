@@ -22,6 +22,12 @@ Or with uv:
 uv sync --extra dev
 ```
 
+GPU backend (PyTorch / Apple Metal MPS):
+
+```bash
+pip install "phasecongruency[gpu]"
+```
+
 ## Quick Start
 
 ```python
@@ -62,7 +68,31 @@ M, m, or_, feat_type, EO, T3 = phasecong3(
 
 # Phase symmetry (blob/line-like structures)
 phSym, orient, totalEnergy, Tps = phasesym(img)
+
+# Optional GPU backend (auto-selects MPS on Apple Silicon if available)
+PC_gpu, orientation_gpu, phase_type_gpu, T_gpu = phasecongmono(
+    img,
+    backend="auto",
+)
+
+# Force Apple Metal backend explicitly
+M_gpu, m_gpu, or_gpu, feat_gpu, EO_gpu, T3_gpu = phasecong3(
+    img,
+    backend="torch-mps",
+)
 ```
+
+`backend="auto"` falls back to NumPy if PyTorch is not installed.
+
+When PyTorch is available, `backend="auto"` benchmarks NumPy vs torch once
+per function + image shape + parameter set, then caches the winner on disk for
+reuse across runs.
+
+- Default cache path:
+  - macOS/Linux: `~/.cache/phasecongruency/auto_backend_cache.json`
+  - Windows: `%LOCALAPPDATA%\\phasecongruency\\auto_backend_cache.json`
+- Override cache path with env var:
+  - `PHASECONGRUENCY_AUTO_CACHE_PATH=/path/to/cache.json`
 
 ## Parameter Configurability
 
@@ -70,6 +100,7 @@ Core algorithm parameters are exposed as keyword arguments in Python.
 
 - Use keyword arguments on: `phasecongmono`, `phasecong3`, `phasesymmono`, `phasesym`, `ppdrc`, `ppdenoise`, `monofilt`, `gaborconvolve`, `highpassmonogenic`, and `bandpassmonogenic`.
 - Default values are defined in each function signature.
+- GPU-capable functions also accept `backend` (`"numpy"`, `"torch"`, `"torch-mps"`, `"auto"`) and optional `device`.
 - Inspect any callable signature directly:
 
 ```python

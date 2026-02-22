@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phasecongruency"
-version = "1.0.3"
+version = "1.0.4"
 description = "Phase based feature detection and image enhancement"
 readme = "README.md"
 license = "MIT"
@@ -37,6 +37,9 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+]
+gpu = [
+    "torch>=2.3",
 ]
 
 [project.urls]

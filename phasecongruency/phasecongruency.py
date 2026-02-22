@@ -8,6 +8,13 @@ peterkovesi.com
 MIT License.
 """
 
+import json
+import os
+import platform
+import sys
+import time
+from pathlib import Path
+
 import numpy as np
 from numpy.fft import fft2, ifft2
 
@@ -23,6 +30,315 @@ from .frequencyfilt import (
     gaussianangularfilter,
 )
 from .utilities import histtruncate
+
+
+_VALID_BACKENDS = {"numpy", "torch", "torch-mps", "auto"}
+_AUTO_BACKEND_CACHE_VERSION = 1
+_AUTO_CACHE_ENV_VAR = "PHASECONGRUENCY_AUTO_CACHE_PATH"
+_AUTO_CACHE_PATH = None
+_AUTO_BACKEND_CACHE = None
+_AUTO_SELECT_MARGIN = 0.95
+
+
+def _resolve_backend(backend):
+    """Normalise backend name and validate it."""
+    if backend is None:
+        backend = "numpy"
+    backend = str(backend).lower()
+    if backend not in _VALID_BACKENDS:
+        raise ValueError(
+            f"Unknown backend '{backend}'. Supported backends: "
+            f"{', '.join(sorted(_VALID_BACKENDS))}"
+        )
+    return backend
+
+
+def _default_auto_cache_path():
+    """Resolve persistent cache path for auto-backend decisions."""
+    override = os.environ.get(_AUTO_CACHE_ENV_VAR)
+    if override:
+        return Path(override).expanduser()
+
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "phasecongruency" / "auto_backend_cache.json"
+
+    return Path.home() / ".cache" / "phasecongruency" / "auto_backend_cache.json"
+
+
+def _auto_cache_path():
+    """Return auto-backend cache path (memoized)."""
+    global _AUTO_CACHE_PATH
+    if _AUTO_CACHE_PATH is None:
+        _AUTO_CACHE_PATH = _default_auto_cache_path()
+    return _AUTO_CACHE_PATH
+
+
+def _load_auto_backend_cache():
+    """Load persistent auto-backend cache once per process."""
+    global _AUTO_BACKEND_CACHE
+    if _AUTO_BACKEND_CACHE is not None:
+        return _AUTO_BACKEND_CACHE
+
+    cache_path = _auto_cache_path()
+    entries = {}
+    try:
+        with cache_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if (
+            isinstance(payload, dict)
+            and payload.get("cache_version") == _AUTO_BACKEND_CACHE_VERSION
+            and isinstance(payload.get("entries"), dict)
+        ):
+            entries = payload["entries"]
+    except (OSError, json.JSONDecodeError):
+        entries = {}
+
+    _AUTO_BACKEND_CACHE = entries
+    return _AUTO_BACKEND_CACHE
+
+
+def _save_auto_backend_cache():
+    """Persist auto-backend cache; silently ignore write failures."""
+    cache = _load_auto_backend_cache()
+    cache_path = _auto_cache_path()
+    payload = {
+        "cache_version": _AUTO_BACKEND_CACHE_VERSION,
+        "entries": cache,
+    }
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, sort_keys=True)
+        tmp_path.replace(cache_path)
+    except OSError:
+        return
+
+
+def _runtime_signature(torch):
+    """Signature used to invalidate cache across environment changes."""
+    return {
+        "cache_version": _AUTO_BACKEND_CACHE_VERSION,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+        "machine": platform.machine(),
+        "numpy": np.__version__,
+        "torch": torch.__version__,
+    }
+
+
+def _auto_cache_key(function_name, img_shape, params, torch_device, torch):
+    """Create a stable cache key for backend auto-selection."""
+    key_payload = {
+        "function": function_name,
+        "shape": [int(img_shape[0]), int(img_shape[1])],
+        "params": params,
+        "torch_device": str(torch_device),
+        "runtime": _runtime_signature(torch),
+    }
+    return json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+
+
+def _import_torch():
+    """Import torch lazily so NumPy users avoid hard dependency on torch."""
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError(
+            "Torch backend requested but PyTorch is not installed. "
+            "Install it with `pip install phasecongruency[gpu]` or install "
+            "a PyTorch build that supports your accelerator."
+        ) from exc
+    return torch
+
+
+def _select_torch_device(torch, backend, device):
+    """Select torch device for requested backend."""
+    if device is not None:
+        return torch.device(device)
+
+    mps_backend = getattr(torch.backends, "mps", None)
+    mps_available = bool(mps_backend and mps_backend.is_available())
+    cuda_available = bool(torch.cuda.is_available())
+
+    if backend == "torch-mps":
+        if not mps_available:
+            raise RuntimeError(
+                "backend='torch-mps' requested, but torch MPS is not available."
+            )
+        return torch.device("mps")
+
+    if backend == "auto":
+        if mps_available:
+            return torch.device("mps")
+        if cuda_available:
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    # backend == "torch"
+    if mps_available:
+        return torch.device("mps")
+    if cuda_available:
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _torch_dtypes(torch, device):
+    """Choose dtypes compatible with selected torch device."""
+    if str(device).startswith("mps"):
+        return torch.float32, torch.complex64
+    return torch.float64, torch.complex128
+
+
+def _synchronize_torch(torch, device):
+    """Synchronize torch device so timing includes all queued work."""
+    device_type = str(device).split(":")[0]
+    if device_type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device_type == "mps" and hasattr(torch, "mps"):
+        torch.mps.synchronize()
+
+
+def _benchmark_callable(fn, torch=None, device=None):
+    """Benchmark a single callable invocation."""
+    if torch is not None and device is not None:
+        _synchronize_torch(torch, device)
+    t0 = time.perf_counter()
+    result = fn()
+    if torch is not None and device is not None:
+        _synchronize_torch(torch, device)
+    return time.perf_counter() - t0, result
+
+
+def _run_auto_backend(
+    *,
+    function_name,
+    img_shape,
+    params,
+    requested_device,
+    numpy_call,
+    torch_call,
+):
+    """Run function using cached adaptive backend decision."""
+    torch = _import_torch()
+    torch_device = _select_torch_device(torch, "auto", requested_device)
+    torch_backend = "torch-mps" if str(torch_device).startswith("mps") else "torch"
+
+    cache_key = _auto_cache_key(function_name, img_shape, params, torch_device, torch)
+    cache = _load_auto_backend_cache()
+    entry = cache.get(cache_key)
+    if isinstance(entry, dict):
+        selected = entry.get("selected")
+        if selected == "numpy":
+            return numpy_call()
+        if selected == "torch":
+            try:
+                return torch_call(torch_backend, str(torch_device))
+            except Exception:
+                cache[cache_key] = {
+                    "selected": "numpy",
+                    "fallback_reason": "cached_torch_failed",
+                    "measured_at_epoch": time.time(),
+                }
+                _save_auto_backend_cache()
+                return numpy_call()
+
+    np_time, np_result = _benchmark_callable(numpy_call)
+    try:
+        torch_time, torch_result = _benchmark_callable(
+            lambda: torch_call(torch_backend, str(torch_device)),
+            torch=torch,
+            device=torch_device,
+        )
+    except Exception as exc:
+        cache[cache_key] = {
+            "selected": "numpy",
+            "numpy_time_sec": np_time,
+            "torch_error": repr(exc),
+            "torch_backend": torch_backend,
+            "measured_at_epoch": time.time(),
+        }
+        _save_auto_backend_cache()
+        return np_result
+
+    selected = "torch" if torch_time < np_time * _AUTO_SELECT_MARGIN else "numpy"
+    cache[cache_key] = {
+        "selected": selected,
+        "numpy_time_sec": np_time,
+        "torch_time_sec": torch_time,
+        "torch_backend": torch_backend,
+        "measured_at_epoch": time.time(),
+    }
+    _save_auto_backend_cache()
+
+    if selected == "torch":
+        return torch_result
+    return np_result
+
+
+def _to_numpy(tensor):
+    """Convert torch tensor to NumPy array."""
+    return tensor.detach().cpu().numpy()
+
+
+def _torch_lowpassfilter(freq, cutoff, n):
+    """Torch equivalent of Butterworth low-pass filter over a frequency grid."""
+    return 1.0 / (1.0 + (freq / cutoff) ** (2 * n))
+
+
+def _torch_loggabor(freq, fo, sigmaonf, eps):
+    """Torch equivalent of loggabor() supporting tensor frequency grids."""
+    out = freq.new_zeros(freq.shape)
+    mask = freq >= eps
+    if bool(mask.any()):
+        log_sigma_sq = np.log(sigmaonf) ** 2
+        out[mask] = ((-(freq[mask] / fo).log() ** 2) / (2 * log_sigma_sq)).exp()
+    return out
+
+
+def _rayleighmode_torch(X, nbins=50):
+    """Torch-friendly Rayleigh mode estimate via NumPy fallback."""
+    return _rayleighmode(_to_numpy(X), nbins=nbins)
+
+
+def _torch_prepare_image(img, backend, device):
+    """Prepare a 2D image tensor and FFT for torch backends."""
+    torch = _import_torch()
+    backend = _resolve_backend(backend)
+    tdevice = _select_torch_device(torch, backend, device)
+    real_dtype, complex_dtype = _torch_dtypes(torch, tdevice)
+
+    img_np = np.asarray(img, dtype=np.float64)
+    if img_np.ndim != 2:
+        raise ValueError("img must be a 2D array")
+
+    img_t = torch.as_tensor(img_np, dtype=real_dtype, device=tdevice)
+    IMG = torch.fft.fft2(img_t)
+    return torch, tdevice, real_dtype, complex_dtype, img_t, IMG
+
+
+def _torch_cosineangularfilter(angl, wavelen, sintheta, costheta):
+    """Torch equivalent of cosineangularfilter()."""
+    sinangl = np.sin(angl)
+    cosangl = np.cos(angl)
+    ds = sintheta * cosangl - costheta * sinangl
+    dc = costheta * cosangl + sintheta * sinangl
+    dtheta = ds.atan2(dc).abs()
+    dtheta = (dtheta * (2 * np.pi / wavelen)).clamp(max=np.pi)
+    return (dtheta.cos() + 1) / 2
+
+
+def _torch_gaussianangularfilter(angl, thetaSigma, sintheta, costheta):
+    """Torch equivalent of gaussianangularfilter()."""
+    sinangl = np.sin(angl)
+    cosangl = np.cos(angl)
+    ds = sintheta * cosangl - costheta * sinangl
+    dc = costheta * cosangl + sintheta * sinangl
+    dtheta = ds.atan2(dc)
+    return ((-dtheta ** 2) / (2 * thetaSigma ** 2)).exp()
 
 
 def _build_histogram(data, nbins=256):
@@ -251,7 +567,7 @@ def bandpassmonogenic(img, minwavelength, maxwavelength, n):
 
 def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
                   k=3.0, noisemethod=-1, cutoff=0.5, g=10.0,
-                  deviationgain=1.5):
+                  deviationgain=1.5, backend="numpy", device=None):
     """Phase congruency of an image using monogenic filters.
 
     This variant is typically faster than phasecong3() and returns a reduced
@@ -289,6 +605,12 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
     deviationgain : float
         Amplification to apply to the calculated phase deviation result.
         Default is 1.5.
+    backend : {"numpy", "torch", "torch-mps", "auto"}, optional
+        Compute backend. ``"numpy"`` keeps existing behavior.
+        ``"auto"`` prefers MPS on Apple Silicon, then CUDA, then CPU.
+    device : str, optional
+        Explicit torch device string (for example ``"mps"``, ``"cuda"``,
+        or ``"cpu"``) when using a torch backend.
 
     Returns
     -------
@@ -301,6 +623,56 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
     T : float
         Calculated noise threshold.
     """
+    backend = _resolve_backend(backend)
+    if backend in {"torch", "torch-mps"}:
+        return _phasecongmono_torch(
+            img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+            sigmaonf=sigmaonf, k=k, noisemethod=noisemethod, cutoff=cutoff,
+            g=g, deviationgain=deviationgain, backend=backend, device=device,
+        )
+    if backend == "auto":
+        try:
+            _import_torch()
+        except ImportError:
+            backend = "numpy"
+        else:
+            img_shape = np.asarray(img).shape
+            if len(img_shape) != 2:
+                return phasecongmono(
+                    img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+                    sigmaonf=sigmaonf, k=k, noisemethod=noisemethod,
+                    cutoff=cutoff, g=g, deviationgain=deviationgain,
+                    backend="numpy", device=device,
+                )
+            return _run_auto_backend(
+                function_name="phasecongmono",
+                img_shape=img_shape,
+                params={
+                    "nscale": nscale,
+                    "minwavelength": minwavelength,
+                    "mult": mult,
+                    "sigmaonf": sigmaonf,
+                    "k": k,
+                    "noisemethod": noisemethod,
+                    "cutoff": cutoff,
+                    "g": g,
+                    "deviationgain": deviationgain,
+                },
+                requested_device=device,
+                numpy_call=lambda: phasecongmono(
+                    img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+                    sigmaonf=sigmaonf, k=k, noisemethod=noisemethod,
+                    cutoff=cutoff, g=g, deviationgain=deviationgain,
+                    backend="numpy", device=device,
+                ),
+                torch_call=lambda b, d: phasecongmono(
+                    img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+                    sigmaonf=sigmaonf, k=k, noisemethod=noisemethod,
+                    cutoff=cutoff, g=g, deviationgain=deviationgain,
+                    backend=b, device=d,
+                ),
+            )
+
     img = np.asarray(img, dtype=np.float64)
     if nscale < 2:
         raise ValueError("nscale must be at least 2")
@@ -378,7 +750,8 @@ def phasecongmono(img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
 
 
 def phasesymmono(img, nscale=5, minwavelength=3, mult=2.1, sigmaonf=0.55,
-                 k=2.0, polarity=0, noisemethod=-1):
+                 k=2.0, polarity=0, noisemethod=-1, backend="numpy",
+                 device=None):
     """Phase symmetry of an image using monogenic filters.
 
     This function calculates the phase symmetry of points in an image.
@@ -406,6 +779,12 @@ def phasesymmono(img, nscale=5, minwavelength=3, mult=2.1, sigmaonf=0.55,
         0: both. Default is 0.
     noisemethod : float
         Noise estimation method. Default is -1.
+    backend : {"numpy", "torch", "torch-mps", "auto"}, optional
+        Compute backend. ``"numpy"`` keeps existing behavior.
+        ``"auto"`` prefers MPS on Apple Silicon, then CUDA, then CPU.
+    device : str, optional
+        Explicit torch device string (for example ``"mps"``, ``"cuda"``,
+        or ``"cpu"``) when using a torch backend.
 
     Returns
     -------
@@ -416,6 +795,51 @@ def phasesymmono(img, nscale=5, minwavelength=3, mult=2.1, sigmaonf=0.55,
     T : float
         Calculated noise threshold.
     """
+    backend = _resolve_backend(backend)
+    if backend in {"torch", "torch-mps"}:
+        return _phasesymmono_torch(
+            img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+            sigmaonf=sigmaonf, k=k, polarity=polarity, noisemethod=noisemethod,
+            backend=backend, device=device,
+        )
+    if backend == "auto":
+        try:
+            _import_torch()
+        except ImportError:
+            backend = "numpy"
+        else:
+            img_shape = np.asarray(img).shape
+            if len(img_shape) != 2:
+                return phasesymmono(
+                    img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+                    sigmaonf=sigmaonf, k=k, polarity=polarity,
+                    noisemethod=noisemethod, backend="numpy", device=device,
+                )
+            return _run_auto_backend(
+                function_name="phasesymmono",
+                img_shape=img_shape,
+                params={
+                    "nscale": nscale,
+                    "minwavelength": minwavelength,
+                    "mult": mult,
+                    "sigmaonf": sigmaonf,
+                    "k": k,
+                    "polarity": polarity,
+                    "noisemethod": noisemethod,
+                },
+                requested_device=device,
+                numpy_call=lambda: phasesymmono(
+                    img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+                    sigmaonf=sigmaonf, k=k, polarity=polarity,
+                    noisemethod=noisemethod, backend="numpy", device=device,
+                ),
+                torch_call=lambda b, d: phasesymmono(
+                    img, nscale=nscale, minwavelength=minwavelength, mult=mult,
+                    sigmaonf=sigmaonf, k=k, polarity=polarity,
+                    noisemethod=noisemethod, backend=b, device=d,
+                ),
+            )
+
     img = np.asarray(img, dtype=np.float64)
     epsilon = 0.0001
 
@@ -629,7 +1053,8 @@ def gaborconvolve(img, nscale, norient, minWaveLength, mult, sigmaOnf,
 
 
 def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
-               sigmaonf=0.55, k=2.0, cutoff=0.5, g=10.0, noisemethod=-1):
+               sigmaonf=0.55, k=2.0, cutoff=0.5, g=10.0, noisemethod=-1,
+               backend="numpy", device=None):
     """Compute edge and corner phase congruency via log-Gabor filters.
 
     Parameters
@@ -655,6 +1080,12 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
         Sharpness of the sigmoid function. Default is 10.
     noisemethod : float
         Noise estimation method. Default is -1.
+    backend : {"numpy", "torch", "torch-mps", "auto"}, optional
+        Compute backend. ``"numpy"`` keeps existing behavior.
+        ``"auto"`` prefers MPS on Apple Silicon, then CUDA, then CPU.
+    device : str, optional
+        Explicit torch device string (for example ``"mps"``, ``"cuda"``,
+        or ``"cpu"``) when using a torch backend.
 
     Returns
     -------
@@ -671,6 +1102,53 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
     T : float
         Calculated noise threshold.
     """
+    backend = _resolve_backend(backend)
+    if backend in {"torch", "torch-mps"}:
+        return _phasecong3_torch(
+            img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+            mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
+            noisemethod=noisemethod, backend=backend, device=device,
+        )
+    if backend == "auto":
+        try:
+            _import_torch()
+        except ImportError:
+            backend = "numpy"
+        else:
+            img_shape = np.asarray(img).shape
+            if len(img_shape) != 2:
+                return phasecong3(
+                    img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+                    mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
+                    noisemethod=noisemethod, backend="numpy", device=device,
+                )
+            return _run_auto_backend(
+                function_name="phasecong3",
+                img_shape=img_shape,
+                params={
+                    "nscale": nscale,
+                    "norient": norient,
+                    "minwavelength": minwavelength,
+                    "mult": mult,
+                    "sigmaonf": sigmaonf,
+                    "k": k,
+                    "cutoff": cutoff,
+                    "g": g,
+                    "noisemethod": noisemethod,
+                },
+                requested_device=device,
+                numpy_call=lambda: phasecong3(
+                    img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+                    mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
+                    noisemethod=noisemethod, backend="numpy", device=device,
+                ),
+                torch_call=lambda b, d: phasecong3(
+                    img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+                    mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
+                    noisemethod=noisemethod, backend=b, device=d,
+                ),
+            )
+
     img = np.asarray(img, dtype=np.float64)
     if nscale < 2:
         raise ValueError("nscale must be at least 2")
@@ -801,7 +1279,8 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
 
 
 def phasesym(img, nscale=5, norient=6, minwavelength=3, mult=2.1,
-             sigmaonf=0.55, k=2.0, polarity=0, noisemethod=-1):
+             sigmaonf=0.55, k=2.0, polarity=0, noisemethod=-1,
+             backend="numpy", device=None):
     """Compute phase symmetry on an image via log-Gabor filters.
 
     This function calculates the phase symmetry of points in an image.
@@ -827,6 +1306,12 @@ def phasesym(img, nscale=5, norient=6, minwavelength=3, mult=2.1,
         Controls polarity. 1: bright, -1: dark, 0: both. Default is 0.
     noisemethod : float
         Noise estimation method. Default is -1.
+    backend : {"numpy", "torch", "torch-mps", "auto"}, optional
+        Compute backend. ``"numpy"`` keeps existing behavior.
+        ``"auto"`` prefers MPS on Apple Silicon, then CUDA, then CPU.
+    device : str, optional
+        Explicit torch device string (for example ``"mps"``, ``"cuda"``,
+        or ``"cpu"``) when using a torch backend.
 
     Returns
     -------
@@ -839,6 +1324,52 @@ def phasesym(img, nscale=5, norient=6, minwavelength=3, mult=2.1,
     T : float
         Calculated noise threshold.
     """
+    backend = _resolve_backend(backend)
+    if backend in {"torch", "torch-mps"}:
+        return _phasesym_torch(
+            img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+            mult=mult, sigmaonf=sigmaonf, k=k, polarity=polarity,
+            noisemethod=noisemethod, backend=backend, device=device,
+        )
+    if backend == "auto":
+        try:
+            _import_torch()
+        except ImportError:
+            backend = "numpy"
+        else:
+            img_shape = np.asarray(img).shape
+            if len(img_shape) != 2:
+                return phasesym(
+                    img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+                    mult=mult, sigmaonf=sigmaonf, k=k, polarity=polarity,
+                    noisemethod=noisemethod, backend="numpy", device=device,
+                )
+            return _run_auto_backend(
+                function_name="phasesym",
+                img_shape=img_shape,
+                params={
+                    "nscale": nscale,
+                    "norient": norient,
+                    "minwavelength": minwavelength,
+                    "mult": mult,
+                    "sigmaonf": sigmaonf,
+                    "k": k,
+                    "polarity": polarity,
+                    "noisemethod": noisemethod,
+                },
+                requested_device=device,
+                numpy_call=lambda: phasesym(
+                    img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+                    mult=mult, sigmaonf=sigmaonf, k=k, polarity=polarity,
+                    noisemethod=noisemethod, backend="numpy", device=device,
+                ),
+                torch_call=lambda b, d: phasesym(
+                    img, nscale=nscale, norient=norient, minwavelength=minwavelength,
+                    mult=mult, sigmaonf=sigmaonf, k=k, polarity=polarity,
+                    noisemethod=noisemethod, backend=b, device=d,
+                ),
+            )
+
     img = np.asarray(img, dtype=np.float64)
     epsilon = 1e-4
     rows, cols = img.shape
@@ -924,7 +1455,8 @@ def phasesym(img, nscale=5, norient=6, minwavelength=3, mult=2.1,
 
 
 def ppdenoise(img, nscale=5, norient=6, mult=2.5, minwavelength=2,
-              sigmaonf=0.55, dthetaonsigma=1.0, k=3.0, softness=1.0):
+              sigmaonf=0.55, dthetaonsigma=1.0, k=3.0, softness=1.0,
+              backend="numpy", device=None):
     """Phase preserving wavelet image denoising.
 
     Parameters
@@ -947,12 +1479,68 @@ def ppdenoise(img, nscale=5, norient=6, mult=2.5, minwavelength=2,
         No of standard deviations of noise to reject. Default is 3.
     softness : float
         Degree of soft thresholding (0: hard, 1: soft). Default is 1.0.
+    backend : {"numpy", "torch", "torch-mps", "auto"}, optional
+        Compute backend. ``"numpy"`` keeps existing behavior.
+        ``"auto"`` prefers MPS on Apple Silicon, then CUDA, then CPU.
+    device : str, optional
+        Explicit torch device string (for example ``"mps"``, ``"cuda"``,
+        or ``"cpu"``) when using a torch backend.
 
     Returns
     -------
     cleanimage : ndarray
         Denoised image.
     """
+    backend = _resolve_backend(backend)
+    if backend in {"torch", "torch-mps"}:
+        return _ppdenoise_torch(
+            img, nscale=nscale, norient=norient, mult=mult,
+            minwavelength=minwavelength, sigmaonf=sigmaonf,
+            dthetaonsigma=dthetaonsigma, k=k, softness=softness,
+            backend=backend, device=device,
+        )
+    if backend == "auto":
+        try:
+            _import_torch()
+        except ImportError:
+            backend = "numpy"
+        else:
+            img_shape = np.asarray(img).shape
+            if len(img_shape) != 2:
+                return ppdenoise(
+                    img, nscale=nscale, norient=norient, mult=mult,
+                    minwavelength=minwavelength, sigmaonf=sigmaonf,
+                    dthetaonsigma=dthetaonsigma, k=k, softness=softness,
+                    backend="numpy", device=device,
+                )
+            return _run_auto_backend(
+                function_name="ppdenoise",
+                img_shape=img_shape,
+                params={
+                    "nscale": nscale,
+                    "norient": norient,
+                    "mult": mult,
+                    "minwavelength": minwavelength,
+                    "sigmaonf": sigmaonf,
+                    "dthetaonsigma": dthetaonsigma,
+                    "k": k,
+                    "softness": softness,
+                },
+                requested_device=device,
+                numpy_call=lambda: ppdenoise(
+                    img, nscale=nscale, norient=norient, mult=mult,
+                    minwavelength=minwavelength, sigmaonf=sigmaonf,
+                    dthetaonsigma=dthetaonsigma, k=k, softness=softness,
+                    backend="numpy", device=device,
+                ),
+                torch_call=lambda b, d: ppdenoise(
+                    img, nscale=nscale, norient=norient, mult=mult,
+                    minwavelength=minwavelength, sigmaonf=sigmaonf,
+                    dthetaonsigma=dthetaonsigma, k=k, softness=softness,
+                    backend=b, device=d,
+                ),
+            )
+
     img = np.asarray(img, dtype=np.float64)
     epsilon = 1e-5
 
@@ -996,3 +1584,412 @@ def ppdenoise(img, nscale=5, norient=6, mult=2.5, minwavelength=2,
             wavelength *= mult
 
     return np.real(totalEnergy)
+
+
+def _phasecongmono_torch(
+    img, nscale=4, minwavelength=3, mult=2.1, sigmaonf=0.55,
+    k=3.0, noisemethod=-1, cutoff=0.5, g=10.0, deviationgain=1.5,
+    backend="auto", device=None,
+):
+    """Torch backend for phasecongmono()."""
+    if nscale < 2:
+        raise ValueError("nscale must be at least 2")
+
+    epsilon = 0.0001
+    torch, tdevice, real_dtype, complex_dtype, img_t, IMG = _torch_prepare_image(
+        img, backend, device
+    )
+    rows, cols = img_t.shape
+
+    H_np, freq_np = packedmonogenicfilters(rows, cols)
+    H = torch.as_tensor(H_np, dtype=complex_dtype, device=tdevice)
+    freq = torch.as_tensor(freq_np, dtype=real_dtype, device=tdevice)
+    lowpass_45 = _torch_lowpassfilter(freq, 0.45, 15)
+    eps_freq = torch.finfo(real_dtype).eps
+
+    sumAn = torch.zeros_like(img_t)
+    sumf = torch.zeros_like(img_t)
+    sumh1 = torch.zeros_like(img_t)
+    sumh2 = torch.zeros_like(img_t)
+    maxAn = torch.zeros_like(img_t)
+
+    tau = 0.0
+    T = 0.0
+
+    for s in range(nscale):
+        wavelength = minwavelength * mult**s
+        fo = 1.0 / wavelength
+
+        IMGF = IMG * _torch_loggabor(freq, fo, sigmaonf, eps_freq) * lowpass_45
+
+        f = torch.real(torch.fft.ifft2(IMGF))
+        h = torch.fft.ifft2(IMGF * H)
+
+        h1 = torch.real(h)
+        h2 = torch.imag(h)
+        An = torch.sqrt(f**2 + h1**2 + h2**2)
+        sumAn = sumAn + An
+        sumf = sumf + f
+        sumh1 = sumh1 + h1
+        sumh2 = sumh2 + h2
+
+        if s == 0:
+            if abs(noisemethod + 1) < epsilon:
+                tau = float(torch.median(sumAn).item() / np.sqrt(np.log(4)))
+            elif abs(noisemethod + 2) < epsilon:
+                tau = float(_rayleighmode_torch(sumAn))
+            maxAn = An.clone()
+        else:
+            maxAn = torch.maximum(maxAn, An)
+
+    width = (sumAn / (maxAn + epsilon) - 1) / (nscale - 1)
+    weight = 1.0 / (1 + torch.exp((cutoff - width) * g))
+
+    if noisemethod >= 0:
+        T = float(noisemethod)
+    else:
+        totalTau = tau * (1 - (1 / mult)**nscale) / (1 - (1 / mult))
+        EstNoiseEnergyMean = totalTau * np.sqrt(np.pi / 2)
+        EstNoiseEnergySigma = totalTau * np.sqrt((4 - np.pi) / 2)
+        T = float(EstNoiseEnergyMean + k * EstNoiseEnergySigma)
+
+    or_ = torch.atan(-sumh2 / sumh1)
+    ft = torch.atan2(sumf, torch.sqrt(sumh1**2 + sumh2**2))
+    energy = torch.sqrt(sumf**2 + sumh1**2 + sumh2**2)
+
+    PC = (
+        weight
+        * torch.clamp(1 - deviationgain * torch.acos(energy / (sumAn + epsilon)), min=0.0)
+        * torch.clamp(energy - T, min=0.0)
+        / (energy + epsilon)
+    )
+
+    return _to_numpy(PC), _to_numpy(or_), _to_numpy(ft), T
+
+
+def _phasesymmono_torch(
+    img, nscale=5, minwavelength=3, mult=2.1, sigmaonf=0.55,
+    k=2.0, polarity=0, noisemethod=-1, backend="auto", device=None,
+):
+    """Torch backend for phasesymmono()."""
+    epsilon = 0.0001
+    torch, tdevice, real_dtype, complex_dtype, img_t, IMG = _torch_prepare_image(
+        img, backend, device
+    )
+    rows, cols = img_t.shape
+
+    H_np, freq_np = packedmonogenicfilters(rows, cols)
+    H = torch.as_tensor(H_np, dtype=complex_dtype, device=tdevice)
+    freq = torch.as_tensor(freq_np, dtype=real_dtype, device=tdevice)
+    lowpass_40 = _torch_lowpassfilter(freq, 0.4, 10)
+    eps_freq = torch.finfo(real_dtype).eps
+
+    tau = 0.0
+    symmetryEnergy = torch.zeros_like(img_t)
+    sumAn = torch.zeros_like(img_t)
+
+    for s in range(nscale):
+        wavelength = minwavelength * mult**s
+        fo = 1.0 / wavelength
+
+        IMGF = IMG * _torch_loggabor(freq, fo, sigmaonf, eps_freq) * lowpass_40
+        f = torch.real(torch.fft.ifft2(IMGF))
+        h = torch.fft.ifft2(IMGF * H)
+
+        h1 = torch.real(h)
+        h2 = torch.imag(h)
+        hAmp2 = h1**2 + h2**2
+        sumAn = sumAn + torch.sqrt(f**2 + hAmp2)
+
+        if polarity == 0:
+            symmetryEnergy = symmetryEnergy + torch.abs(f) - torch.sqrt(hAmp2)
+        elif polarity == 1:
+            symmetryEnergy = symmetryEnergy + f - torch.sqrt(hAmp2)
+        elif polarity == -1:
+            symmetryEnergy = symmetryEnergy - f - torch.sqrt(hAmp2)
+
+        if s == 0:
+            if abs(noisemethod + 1) < epsilon:
+                tau = float(torch.median(sumAn).item() / np.sqrt(np.log(4)))
+            elif abs(noisemethod + 2) < epsilon:
+                tau = float(_rayleighmode_torch(sumAn))
+
+    if noisemethod >= 0:
+        T = float(noisemethod)
+    else:
+        totalTau = tau * (1 - (1 / mult)**nscale) / (1 - (1 / mult))
+        EstNoiseEnergyMean = totalTau * np.sqrt(np.pi / 2)
+        EstNoiseEnergySigma = totalTau * np.sqrt((4 - np.pi) / 2)
+        T = float(max(EstNoiseEnergyMean + k * EstNoiseEnergySigma, epsilon))
+
+    phSym = torch.clamp(symmetryEnergy - T, min=0.0) / (sumAn + epsilon)
+
+    return _to_numpy(phSym), _to_numpy(symmetryEnergy), T
+
+
+def _phasecong3_torch(
+    img, nscale=4, norient=6, minwavelength=3, mult=2.1, sigmaonf=0.55,
+    k=2.0, cutoff=0.5, g=10.0, noisemethod=-1, backend="auto", device=None,
+):
+    """Torch backend for phasecong3()."""
+    if nscale < 2:
+        raise ValueError("nscale must be at least 2")
+
+    epsilon = 1e-5
+    torch, tdevice, real_dtype, _, img_t, IMG = _torch_prepare_image(
+        img, backend, device
+    )
+    rows, cols = img_t.shape
+
+    logGabor_arr = [None] * nscale
+    EO = [[None] * norient for _ in range(nscale)]
+    EnergyV = torch.zeros((rows, cols, 3), dtype=real_dtype, device=tdevice)
+
+    covx2 = torch.zeros_like(img_t)
+    covy2 = torch.zeros_like(img_t)
+    covxy = torch.zeros_like(img_t)
+
+    sumE_ThisOrient = torch.zeros_like(img_t)
+    sumO_ThisOrient = torch.zeros_like(img_t)
+    sumAn_ThisOrient = torch.zeros_like(img_t)
+    Energy = torch.zeros_like(img_t)
+    maxAn = torch.zeros_like(img_t)
+
+    T = 0.0
+    tau = 0.0
+
+    freq_np, fx_np, fy_np = filtergrids(rows, cols)
+    sintheta_np, costheta_np = gridangles(freq_np, fx_np, fy_np)
+
+    freq = torch.as_tensor(freq_np, dtype=real_dtype, device=tdevice)
+    sintheta = torch.as_tensor(sintheta_np, dtype=real_dtype, device=tdevice)
+    costheta = torch.as_tensor(costheta_np, dtype=real_dtype, device=tdevice)
+
+    lowpass_45 = _torch_lowpassfilter(freq, 0.45, 15)
+    eps_freq = torch.finfo(real_dtype).eps
+    for s in range(nscale):
+        wavelength = minwavelength * mult**s
+        fo = 1.0 / wavelength
+        lg = _torch_loggabor(freq, fo, sigmaonf, eps_freq) * lowpass_45
+        logGabor_arr[s] = lg
+
+    for o in range(norient):
+        angl = o * np.pi / norient
+        wavelen = 4 * np.pi / norient
+        angfilter = _torch_cosineangularfilter(angl, wavelen, sintheta, costheta)
+
+        sumE_ThisOrient.zero_()
+        sumO_ThisOrient.zero_()
+        sumAn_ThisOrient.zero_()
+        Energy.zero_()
+
+        for s in range(nscale):
+            filt = logGabor_arr[s] * angfilter
+            eo = torch.fft.ifft2(IMG * filt)
+            EO[s][o] = eo
+
+            An = torch.abs(eo)
+            sumAn_ThisOrient = sumAn_ThisOrient + An
+            sumE_ThisOrient = sumE_ThisOrient + torch.real(eo)
+            sumO_ThisOrient = sumO_ThisOrient + torch.imag(eo)
+
+            if s == 0:
+                if abs(noisemethod + 1) < epsilon:
+                    tau = float(torch.median(sumAn_ThisOrient).item() / np.sqrt(np.log(4)))
+                elif abs(noisemethod + 2) < epsilon:
+                    tau = float(_rayleighmode_torch(sumAn_ThisOrient))
+                maxAn = An.clone()
+            else:
+                maxAn = torch.maximum(maxAn, An)
+
+        EnergyV[:, :, 0] = EnergyV[:, :, 0] + sumE_ThisOrient
+        EnergyV[:, :, 1] = EnergyV[:, :, 1] + np.cos(angl) * sumO_ThisOrient
+        EnergyV[:, :, 2] = EnergyV[:, :, 2] + np.sin(angl) * sumO_ThisOrient
+
+        XEnergy = torch.sqrt(sumE_ThisOrient**2 + sumO_ThisOrient**2) + epsilon
+        MeanE = sumE_ThisOrient / XEnergy
+        MeanO = sumO_ThisOrient / XEnergy
+
+        for s in range(nscale):
+            E_val = torch.real(EO[s][o])
+            O_val = torch.imag(EO[s][o])
+            Energy = Energy + (
+                E_val * MeanE + O_val * MeanO
+                - torch.abs(E_val * MeanO - O_val * MeanE)
+            )
+
+        if noisemethod >= 0:
+            T = float(noisemethod)
+        else:
+            totalTau = tau * (1 - (1 / mult)**nscale) / (1 - (1 / mult))
+            EstNoiseEnergyMean = totalTau * np.sqrt(np.pi / 2)
+            EstNoiseEnergySigma = totalTau * np.sqrt((4 - np.pi) / 2)
+            T = float(EstNoiseEnergyMean + k * EstNoiseEnergySigma)
+
+        Energy = torch.clamp(Energy - T, min=0.0)
+
+        width = (sumAn_ThisOrient / (maxAn + epsilon) - 1) / (nscale - 1)
+        weight_arr = 1.0 / (1 + torch.exp((cutoff - width) * g))
+        PCo = weight_arr * Energy / sumAn_ThisOrient
+
+        covx = PCo * np.cos(angl)
+        covy = PCo * np.sin(angl)
+        covx2 = covx2 + covx**2
+        covy2 = covy2 + covy**2
+        covxy = covxy + covx * covy
+
+    covx2 = covx2 / (norient / 2)
+    covy2 = covy2 / (norient / 2)
+    covxy = covxy * (4 / norient)
+
+    denom = torch.sqrt(covxy**2 + (covx2 - covy2)**2) + epsilon
+    M = (covy2 + covx2 + denom) / 2
+    m = (covy2 + covx2 - denom) / 2
+
+    or_ = torch.atan(-EnergyV[:, :, 2] / EnergyV[:, :, 1])
+    OddV = torch.sqrt(EnergyV[:, :, 1]**2 + EnergyV[:, :, 2]**2)
+    featType = torch.atan2(EnergyV[:, :, 0], OddV)
+
+    EO_np = [[_to_numpy(EO[s][o]) for o in range(norient)] for s in range(nscale)]
+    return _to_numpy(M), _to_numpy(m), _to_numpy(or_), _to_numpy(featType), EO_np, T
+
+
+def _phasesym_torch(
+    img, nscale=5, norient=6, minwavelength=3, mult=2.1, sigmaonf=0.55,
+    k=2.0, polarity=0, noisemethod=-1, backend="auto", device=None,
+):
+    """Torch backend for phasesym()."""
+    epsilon = 1e-4
+    torch, tdevice, real_dtype, _, img_t, IMG = _torch_prepare_image(
+        img, backend, device
+    )
+    rows, cols = img_t.shape
+
+    logGabor_arr = [None] * nscale
+    totalEnergy = torch.zeros_like(img_t)
+    totalSumAn = torch.zeros_like(img_t)
+    orientation = torch.zeros_like(img_t)
+    maxEnergy = torch.zeros_like(img_t)
+
+    tau = 0.0
+    T = 0.0
+
+    freq_np, fx_np, fy_np = filtergrids(rows, cols)
+    sintheta_np, costheta_np = gridangles(freq_np, fx_np, fy_np)
+
+    freq = torch.as_tensor(freq_np, dtype=real_dtype, device=tdevice)
+    sintheta = torch.as_tensor(sintheta_np, dtype=real_dtype, device=tdevice)
+    costheta = torch.as_tensor(costheta_np, dtype=real_dtype, device=tdevice)
+
+    lowpass_45 = _torch_lowpassfilter(freq, 0.45, 15)
+    eps_freq = torch.finfo(real_dtype).eps
+    for s in range(nscale):
+        wavelength = minwavelength * mult**s
+        fo = 1.0 / wavelength
+        logGabor_arr[s] = _torch_loggabor(freq, fo, sigmaonf, eps_freq) * lowpass_45
+
+    for o in range(norient):
+        angl = o * np.pi / norient
+        wavelen = 4 * np.pi / norient
+        angfilter = _torch_cosineangularfilter(angl, wavelen, sintheta, costheta)
+
+        sumAn_ThisOrient = torch.zeros_like(img_t)
+        Energy_ThisOrient = torch.zeros_like(img_t)
+
+        for s in range(nscale):
+            filt = logGabor_arr[s] * angfilter
+            EO = torch.fft.ifft2(IMG * filt)
+            An = torch.abs(EO)
+            sumAn_ThisOrient = sumAn_ThisOrient + An
+
+            if s == 0:
+                if abs(noisemethod + 1) < epsilon:
+                    tau = float(torch.median(sumAn_ThisOrient).item() / np.sqrt(np.log(4)))
+                elif abs(noisemethod + 2) < epsilon:
+                    tau = float(_rayleighmode_torch(sumAn_ThisOrient))
+
+            if polarity == 0:
+                Energy_ThisOrient = Energy_ThisOrient + torch.abs(torch.real(EO)) - torch.abs(torch.imag(EO))
+            elif polarity == 1:
+                Energy_ThisOrient = Energy_ThisOrient + torch.real(EO) - torch.abs(torch.imag(EO))
+            elif polarity == -1:
+                Energy_ThisOrient = Energy_ThisOrient - torch.real(EO) - torch.abs(torch.imag(EO))
+
+        if noisemethod >= 0:
+            T = float(noisemethod)
+        else:
+            totalTau = tau * (1 - (1 / mult)**nscale) / (1 - (1 / mult))
+            EstNoiseEnergyMean = totalTau * np.sqrt(np.pi / 2)
+            EstNoiseEnergySigma = totalTau * np.sqrt((4 - np.pi) / 2)
+            T = float(max(EstNoiseEnergyMean + k * EstNoiseEnergySigma, epsilon))
+
+        Energy_ThisOrient = Energy_ThisOrient - T
+
+        totalSumAn = totalSumAn + sumAn_ThisOrient
+        totalEnergy = totalEnergy + Energy_ThisOrient
+
+        if o == 0:
+            maxEnergy = Energy_ThisOrient.clone()
+        else:
+            mask = Energy_ThisOrient > maxEnergy
+            orientation[mask] = o
+            maxEnergy = torch.maximum(maxEnergy, Energy_ThisOrient)
+
+    phSym = torch.clamp(totalEnergy, min=0.0) / (totalSumAn + epsilon)
+    orientation = orientation * np.pi / norient - np.pi / 2
+
+    return _to_numpy(phSym), _to_numpy(orientation), _to_numpy(totalEnergy), T
+
+
+def _ppdenoise_torch(
+    img, nscale=5, norient=6, mult=2.5, minwavelength=2, sigmaonf=0.55,
+    dthetaonsigma=1.0, k=3.0, softness=1.0, backend="auto", device=None,
+):
+    """Torch backend for ppdenoise()."""
+    epsilon = 1e-5
+    thetaSigma = np.pi / norient / dthetaonsigma
+
+    torch, tdevice, real_dtype, complex_dtype, img_t, IMG = _torch_prepare_image(
+        img, backend, device
+    )
+    rows, cols = img_t.shape
+
+    freq_np, fx_np, fy_np = filtergrids(rows, cols)
+    sintheta_np, costheta_np = gridangles(freq_np, fx_np, fy_np)
+    freq = torch.as_tensor(freq_np, dtype=real_dtype, device=tdevice)
+    sintheta = torch.as_tensor(sintheta_np, dtype=real_dtype, device=tdevice)
+    costheta = torch.as_tensor(costheta_np, dtype=real_dtype, device=tdevice)
+    eps_freq = torch.finfo(real_dtype).eps
+
+    totalEnergy = torch.zeros((rows, cols), dtype=complex_dtype, device=tdevice)
+
+    RayMean = 0.0
+    RayVar = 0.0
+
+    for o in range(norient):
+        angl = o * np.pi / norient
+        angfilter = _torch_gaussianangularfilter(angl, thetaSigma, sintheta, costheta)
+
+        wavelength = minwavelength
+        for s in range(nscale):
+            fo = 1.0 / wavelength
+            filt = _torch_loggabor(freq, fo, sigmaonf, eps_freq) * angfilter
+
+            EO = torch.fft.ifft2(IMG * filt)
+            aEO = torch.abs(EO)
+
+            if s == 0:
+                RayMean = float(torch.median(aEO).item() * 0.5 * np.sqrt(-np.pi / np.log(0.5)))
+                RayVar = float((4 - np.pi) * (RayMean**2) / np.pi)
+
+            T = (RayMean + k * np.sqrt(RayVar)) / (mult**s)
+
+            mask = aEO > T
+            V = softness * T * EO / (aEO + epsilon)
+            EO_denoised = EO.clone()
+            EO_denoised[mask] = EO_denoised[mask] - V[mask]
+            totalEnergy[mask] = totalEnergy[mask] + EO_denoised[mask]
+
+            wavelength *= mult
+
+    return _to_numpy(torch.real(totalEnergy))

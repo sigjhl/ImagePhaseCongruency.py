@@ -4,6 +4,9 @@ Hard to test these functions other than visually. This script simply
 runs them all to make sure that they at least run without error.
 """
 
+import importlib.util
+import json
+
 import numpy as np
 import pytest
 
@@ -20,6 +23,7 @@ from phasecongruency import (
     bandpassmonogenic,
     geoseries,
 )
+import phasecongruency.phasecongruency as phasecongruency_module
 
 
 @pytest.fixture
@@ -65,6 +69,55 @@ class TestPhasecongmono:
     def test_nscale_too_small_raises(self, test_image):
         with pytest.raises(ValueError):
             phasecongmono(test_image, nscale=1)
+
+    def test_invalid_backend_raises(self, test_image):
+        with pytest.raises(ValueError):
+            phasecongmono(test_image, backend="invalid-backend")
+
+    def test_torch_backend_requires_torch_if_unavailable(self, test_image):
+        if importlib.util.find_spec("torch") is not None:
+            pytest.skip("torch is installed")
+        with pytest.raises(ImportError):
+            phasecongmono(test_image, backend="torch")
+
+    def test_auto_backend_falls_back_to_numpy_if_torch_unavailable(self, test_image):
+        if importlib.util.find_spec("torch") is not None:
+            pytest.skip("torch is installed")
+        PC, or_, ft, _ = phasecongmono(test_image, backend="auto")
+        assert PC.shape == test_image.shape
+        assert or_.shape == test_image.shape
+        assert ft.shape == test_image.shape
+
+    def test_auto_backend_persists_and_reuses_cache_when_torch_available(
+        self, test_image, tmp_path, monkeypatch
+    ):
+        if importlib.util.find_spec("torch") is None:
+            pytest.skip("torch is not installed")
+
+        cache_path = tmp_path / "auto_backend_cache.json"
+        monkeypatch.setenv("PHASECONGRUENCY_AUTO_CACHE_PATH", str(cache_path))
+        monkeypatch.setattr(phasecongruency_module, "_AUTO_CACHE_PATH", None)
+        monkeypatch.setattr(phasecongruency_module, "_AUTO_BACKEND_CACHE", None)
+
+        img = test_image[:32, :32]
+        PC, or_, ft, _ = phasecongmono(img, backend="auto")
+        assert PC.shape == img.shape
+        assert or_.shape == img.shape
+        assert ft.shape == img.shape
+        assert cache_path.exists()
+
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert payload.get("entries")
+
+        monkeypatch.setattr(phasecongruency_module, "_AUTO_BACKEND_CACHE", None)
+
+        def fail_benchmark(*args, **kwargs):
+            raise AssertionError("benchmark should not run on cache hit")
+
+        monkeypatch.setattr(
+            phasecongruency_module, "_benchmark_callable", fail_benchmark
+        )
+        phasecongmono(img, backend="auto")
 
 
 class TestPhasesymmono:
