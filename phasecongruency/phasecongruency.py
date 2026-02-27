@@ -1054,7 +1054,7 @@ def gaborconvolve(img, nscale, norient, minWaveLength, mult, sigmaOnf,
 
 def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
                sigmaonf=0.55, k=2.0, cutoff=0.5, g=10.0, noisemethod=-1,
-               backend="numpy", device=None):
+               backend="numpy", device=None, return_eo=True):
     """Compute edge and corner phase congruency via log-Gabor filters.
 
     Parameters
@@ -1086,6 +1086,10 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
     device : str, optional
         Explicit torch device string (for example ``"mps"``, ``"cuda"``,
         or ``"cpu"``) when using a torch backend.
+    return_eo : bool, optional
+        If True (default), return the full complex EO bank as in the
+        historical API. If False, skips EO bank materialization to reduce
+        memory usage and returns ``None`` for EO.
 
     Returns
     -------
@@ -1098,7 +1102,8 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
     featType : ndarray
         Local weighted mean phase angle (feature type).
     EO : list of list of ndarray (complex)
-        2D array of complex valued convolution results.
+        2D array of complex valued convolution results, or ``None`` when
+        ``return_eo=False``.
     T : float
         Calculated noise threshold.
     """
@@ -1108,6 +1113,7 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
             img, nscale=nscale, norient=norient, minwavelength=minwavelength,
             mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
             noisemethod=noisemethod, backend=backend, device=device,
+            return_eo=return_eo,
         )
     if backend == "auto":
         try:
@@ -1121,6 +1127,7 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
                     img, nscale=nscale, norient=norient, minwavelength=minwavelength,
                     mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
                     noisemethod=noisemethod, backend="numpy", device=device,
+                    return_eo=return_eo,
                 )
             return _run_auto_backend(
                 function_name="phasecong3",
@@ -1135,17 +1142,20 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
                     "cutoff": cutoff,
                     "g": g,
                     "noisemethod": noisemethod,
+                    "return_eo": return_eo,
                 },
                 requested_device=device,
                 numpy_call=lambda: phasecong3(
                     img, nscale=nscale, norient=norient, minwavelength=minwavelength,
                     mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
                     noisemethod=noisemethod, backend="numpy", device=device,
+                    return_eo=return_eo,
                 ),
                 torch_call=lambda b, d: phasecong3(
                     img, nscale=nscale, norient=norient, minwavelength=minwavelength,
                     mult=mult, sigmaonf=sigmaonf, k=k, cutoff=cutoff, g=g,
                     noisemethod=noisemethod, backend=b, device=d,
+                    return_eo=return_eo,
                 ),
             )
 
@@ -1157,7 +1167,7 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
     IMG = fft2(img)
 
     logGabor_arr = [None] * nscale
-    EO = [[None] * norient for _ in range(nscale)]
+    EO = [[None] * norient for _ in range(nscale)] if return_eo else None
     EnergyV = np.zeros((rows, cols, 3))
 
     covx2 = np.zeros((rows, cols))
@@ -1201,15 +1211,19 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
         sumO_ThisOrient[:] = 0
         sumAn_ThisOrient[:] = 0
         Energy[:] = 0
+        eo_this_orient = [None] * nscale
 
         for s in range(nscale):
             filt = logGabor_arr[s] * angfilter
-            EO[s][o] = ifft2(IMG * filt)
+            eo = ifft2(IMG * filt)
+            eo_this_orient[s] = eo
+            if return_eo:
+                EO[s][o] = eo
 
-            An[:] = np.abs(EO[s][o])
+            An[:] = np.abs(eo)
             sumAn_ThisOrient += An
-            sumE_ThisOrient += np.real(EO[s][o])
-            sumO_ThisOrient += np.imag(EO[s][o])
+            sumE_ThisOrient += np.real(eo)
+            sumO_ThisOrient += np.imag(eo)
 
             if s == 0:
                 if abs(noisemethod + 1) < epsilon:
@@ -1231,9 +1245,9 @@ def phasecong3(img, nscale=4, norient=6, minwavelength=3, mult=2.1,
         MeanO = sumO_ThisOrient / XEnergy
 
         # Phase congruency energy
-        for s in range(nscale):
-            E_val = np.real(EO[s][o])
-            O_val = np.imag(EO[s][o])
+        for eo in eo_this_orient:
+            E_val = np.real(eo)
+            O_val = np.imag(eo)
             Energy += (
                 E_val * MeanE + O_val * MeanO
                 - np.abs(E_val * MeanO - O_val * MeanE)
@@ -1730,6 +1744,7 @@ def _phasesymmono_torch(
 def _phasecong3_torch(
     img, nscale=4, norient=6, minwavelength=3, mult=2.1, sigmaonf=0.55,
     k=2.0, cutoff=0.5, g=10.0, noisemethod=-1, backend="auto", device=None,
+    return_eo=True,
 ):
     """Torch backend for phasecong3()."""
     if nscale < 2:
@@ -1742,7 +1757,7 @@ def _phasecong3_torch(
     rows, cols = img_t.shape
 
     logGabor_arr = [None] * nscale
-    EO = [[None] * norient for _ in range(nscale)]
+    EO = [[None] * norient for _ in range(nscale)] if return_eo else None
     EnergyV = torch.zeros((rows, cols, 3), dtype=real_dtype, device=tdevice)
 
     covx2 = torch.zeros_like(img_t)
@@ -1782,11 +1797,14 @@ def _phasecong3_torch(
         sumO_ThisOrient.zero_()
         sumAn_ThisOrient.zero_()
         Energy.zero_()
+        eo_this_orient = [None] * nscale
 
         for s in range(nscale):
             filt = logGabor_arr[s] * angfilter
             eo = torch.fft.ifft2(IMG * filt)
-            EO[s][o] = eo
+            eo_this_orient[s] = eo
+            if return_eo:
+                EO[s][o] = eo
 
             An = torch.abs(eo)
             sumAn_ThisOrient = sumAn_ThisOrient + An
@@ -1810,9 +1828,9 @@ def _phasecong3_torch(
         MeanE = sumE_ThisOrient / XEnergy
         MeanO = sumO_ThisOrient / XEnergy
 
-        for s in range(nscale):
-            E_val = torch.real(EO[s][o])
-            O_val = torch.imag(EO[s][o])
+        for eo in eo_this_orient:
+            E_val = torch.real(eo)
+            O_val = torch.imag(eo)
             Energy = Energy + (
                 E_val * MeanE + O_val * MeanO
                 - torch.abs(E_val * MeanO - O_val * MeanE)
@@ -1850,7 +1868,9 @@ def _phasecong3_torch(
     OddV = torch.sqrt(EnergyV[:, :, 1]**2 + EnergyV[:, :, 2]**2)
     featType = torch.atan2(EnergyV[:, :, 0], OddV)
 
-    EO_np = [[_to_numpy(EO[s][o]) for o in range(norient)] for s in range(nscale)]
+    EO_np = None
+    if return_eo:
+        EO_np = [[_to_numpy(EO[s][o]) for o in range(norient)] for s in range(nscale)]
     return _to_numpy(M), _to_numpy(m), _to_numpy(or_), _to_numpy(featType), EO_np, T
 
 

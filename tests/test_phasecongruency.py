@@ -154,6 +154,52 @@ class TestPhasecong3:
         with pytest.raises(ValueError):
             phasecong3(test_image, nscale=1)
 
+    def test_return_eo_false_matches_core_outputs_numpy(self, test_image):
+        M1, m1, or1, ft1, EO1, T1 = phasecong3(test_image, backend="numpy", return_eo=True)
+        M2, m2, or2, ft2, EO2, T2 = phasecong3(test_image, backend="numpy", return_eo=False)
+
+        assert EO1 is not None
+        assert EO2 is None
+        np.testing.assert_allclose(M1, M2, atol=1e-12)
+        np.testing.assert_allclose(m1, m2, atol=1e-12)
+        np.testing.assert_allclose(or1, or2, atol=1e-12)
+        np.testing.assert_allclose(ft1, ft2, atol=1e-12)
+        assert np.isclose(T1, T2)
+
+    def test_return_eo_false_matches_core_outputs_torch(self, test_image):
+        if importlib.util.find_spec("torch") is None:
+            pytest.skip("torch is not installed")
+
+        M1, m1, or1, ft1, EO1, T1 = phasecong3(test_image, backend="torch", return_eo=True)
+        M2, m2, or2, ft2, EO2, T2 = phasecong3(test_image, backend="torch", return_eo=False)
+
+        assert EO1 is not None
+        assert EO2 is None
+        np.testing.assert_allclose(M1, M2, atol=1e-7)
+        np.testing.assert_allclose(m1, m2, atol=1e-7)
+        np.testing.assert_allclose(or1, or2, atol=1e-7)
+        np.testing.assert_allclose(ft1, ft2, atol=1e-7)
+        assert np.isclose(T1, T2)
+
+    def test_return_eo_false_matches_core_outputs_torch_mps(self, test_image):
+        if importlib.util.find_spec("torch") is None:
+            pytest.skip("torch is not installed")
+        import torch
+
+        if not (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
+            pytest.skip("torch MPS is not available")
+
+        M1, m1, or1, ft1, EO1, T1 = phasecong3(test_image, backend="torch-mps", return_eo=True)
+        M2, m2, or2, ft2, EO2, T2 = phasecong3(test_image, backend="torch-mps", return_eo=False)
+
+        assert EO1 is not None
+        assert EO2 is None
+        np.testing.assert_allclose(M1, M2, atol=1e-5)
+        np.testing.assert_allclose(m1, m2, atol=1e-5)
+        np.testing.assert_allclose(or1, or2, atol=1e-5)
+        np.testing.assert_allclose(ft1, ft2, atol=1e-5)
+        assert np.isclose(T1, T2)
+
 
 class TestPhasesym:
     def test_default(self, test_image):

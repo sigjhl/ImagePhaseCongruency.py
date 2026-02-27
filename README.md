@@ -80,6 +80,13 @@ M_gpu, m_gpu, or_gpu, feat_gpu, EO_gpu, T3_gpu = phasecong3(
     img,
     backend="torch-mps",
 )
+
+# Low-memory mode when EO outputs are not needed
+M_lm, m_lm, or_lm, feat_lm, EO_lm, T_lm = phasecong3(
+    img,
+    return_eo=False,
+)
+assert EO_lm is None
 ```
 
 `backend="auto"` falls back to NumPy if PyTorch is not installed.
